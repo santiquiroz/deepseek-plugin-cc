@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.0 — 2026-10-06
+
+- Detached `start` jobs and `wait` slices let delegations run up to
+  `DEEPSEEK_RESCUE_MAX_SECONDS` (default 2700 seconds, 45 minutes) beyond the
+  Bash tool's 600-second foreground limit. The unchanged `run` command keeps
+  its 9-minute cap for short calls.
+- Incremental progress survives slice boundaries, including partial JSON
+  lines; completion retains session memory, summaries and git-change warnings.
+- `cancel <id>` stops the process tree with exit 130; an expired deadline
+  stops it with exit 124. Interrupted subagents leave the job running for a
+  later `wait` or `cancel` call.
+- The subagent uses separate foreground `preflight`, `start` and repeated
+  `wait` calls instead of a single long Bash call.
+
 ## 0.1.0 — 2026-01-15
 
 First release, verified against DeepSeek Harness desktop app 0.2.0-rc.2

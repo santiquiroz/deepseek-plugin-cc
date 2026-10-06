@@ -53,6 +53,19 @@ Claude: continues with the next task while delegations run
 
 ## Safety rules
 
+- The subagent calls `preflight`, then `start`, then `wait <id>` repeatedly
+  while it exits 75. Each call is foreground and separate; waits use a
+  600000 ms Bash timeout and never `run_in_background`. The script detaches
+  the job and waits in 480-second slices (maximum 540).
+- `DEEPSEEK_RESCUE_MAX_SECONDS` sets the deadline (default 2700 seconds,
+  45 minutes). Budget at most `1 + 1 + ceil(MAX/480) + 1` Bash calls.
+  The old 9-minute cap kept a single foreground call below the Bash tool's
+  600-second ceiling; the unchanged `run` remains that short path.
+- If the subagent is interrupted, the job keeps running. Retain its started
+  job id to call `bash "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-forward.sh" wait <id>`
+  or `cancel <id>` later. Cancellation stops the process tree with exit 130;
+  a wait past the deadline stops it with exit 124. Existing edits remain.
+
 - Every delegated run is sandboxed to the working directory
   (`DSH_PERMISSION_MODE=workspace-write` by default); writes outside it fail
   closed. `--read-only` refuses edits. `danger-full-access` is never used.

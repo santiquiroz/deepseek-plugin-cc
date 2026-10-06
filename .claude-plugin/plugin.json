@@ -1,6 +1,6 @@
 {
   "name": "deepseek",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Delegate coding tasks from Claude Code to DeepSeek Harness CLI (dsh) in headless mode — the preferred first agentic lane, with a read-only mode for second opinions.",
   "author": {
     "name": "Santiago Quiroz Upegui"

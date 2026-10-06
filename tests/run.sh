@@ -66,6 +66,7 @@ new_sandbox() {
   export DSH_BIN="$HOME/bin/dsh"
   unset DEEPSEEK_API_KEY FAKE_DSH_MODE FAKE_DSH_STDERR FAKE_DSH_EXIT
   unset DEEPSEEK_RESCUE_TIMEOUT DSH_PERMISSION_MODE MSYS_NO_PATHCONV MSYS2_ARG_CONV_EXCL
+  unset DEEPSEEK_RESCUE_MAX_SECONDS FAKE_DSH_SLEEP FAKE_DSH_CHILD_PID_FILE
   unset GIT_TERMINAL_PROMPT GIT_SSH_COMMAND ELECTRON_RUN_AS_NODE DSH_RESCUE_META_FILE
   PATH="$HOME/bin:/usr/bin:/bin"
   [ -n "$REAL_GIT_DIR" ] && PATH="$PATH:$REAL_GIT_DIR"
@@ -414,6 +415,206 @@ test_manifests() {
   assert_equal "$plugin_version" "$(printf '%s\n' "$marketplace_versions" | sed -n '2p')" "Marketplace plugin version"
 }
 
+start_job() {
+  printf '%s\n' 'detached task' >"$HOME/task.txt"
+  invoke_file "$HOME/task.txt" start "$@"
+  assert_status 0 "$LAST_STATUS" "Detached start"
+  JOB_ID=$(printf '%s\n' "$LAST_OUTPUT" | sed -n 's/^\[deepseek-rescue\] started job //p')
+  [ -n "$JOB_ID" ] || fail "Start returned no job id"
+  JOB_DIR="$DEEPSEEK_RESCUE_HOME/jobs/$JOB_ID"
+}
+
+await_file() {
+  local attempt=0
+  while [ ! -f "$1" ] && [ "$attempt" -lt 100 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  [ -f "$1" ] || fail "Fake launcher did not create $1"
+}
+
+assert_child_stopped() {
+  local child_pid attempt=0
+  child_pid=$(cat "$FAKE_DSH_CHILD_PID_FILE")
+  while kill -0 "$child_pid" 2>/dev/null && [ "$attempt" -lt 30 ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "$child_pid" 2>/dev/null; then
+    fail "Detached child process $child_pid survived termination"
+  fi
+}
+
+test_start_metadata() {
+  export FAKE_DSH_MODE=sleep FAKE_DSH_SLEEP=30
+  start_job --model deepseek-v4-pro --read-only
+  assert_not_contains "$LAST_OUTPUT" 'done in' "Start returns before job completion"
+  for file in pid workspace started deadline git-before patch task; do
+    [ -s "$JOB_DIR/$file" ] || fail "Missing job metadata $file"
+  done
+  [ ! -e "$JOB_DIR/exit" ] || fail "Start waited for sleeping job"
+  assert_equal 2700 "$(( $(cat "$JOB_DIR/deadline") - $(cat "$JOB_DIR/started") ))" "Default job deadline"
+  await_file "$FAKE_DSH_CALLS/1.patch"
+  load_call_args 1
+  assert_arg --json "Detached JSON flag"
+  assert_arg --patch "Detached patch flag"
+  assert_contains "$(cat "$FAKE_DSH_CALLS/1.patch")" 'model: deepseek-v4-pro' "Detached named model"
+  assert_env_value "$FAKE_DSH_CALLS/1.env" DSH_PERMISSION_MODE read-only
+  assert_contains "$(cat "$FAKE_DSH_CALLS/1.stdin")" "$(extract_constraint READ_ONLY_CONSTRAINTS)" "Detached read-only constraints"
+  invoke_args cancel "$JOB_ID"
+  assert_status 130 "$LAST_STATUS" "Metadata job cleanup"
+}
+
+test_wait_partial_progress() {
+  export FAKE_DSH_MODE=partial FAKE_DSH_SLEEP=10
+  start_job
+  await_file "$FAKE_DSH_CALLS/partial-ready"
+  invoke_args wait "$JOB_ID" --slice 1
+  assert_status 75 "$LAST_STATUS" "Running slice"
+  assert_contains "$LAST_OUTPUT" 'First progress.' "Initial progress"
+  assert_contains "$LAST_OUTPUT" '  > write split.txt' "Initial tool call"
+  assert_contains "$LAST_OUTPUT" "job $JOB_ID still running" "Running slice message"
+  assert_not_contains "$LAST_OUTPUT" 'Trailing' "Incomplete JSON remains buffered"
+  [ -s "$JOB_DIR/offset" ] || fail "Wait did not persist stdout offset"
+  invoke_args wait "$JOB_ID" --slice 15
+  assert_status 0 "$LAST_STATUS" "Completed later slice"
+  assert_not_contains "$LAST_OUTPUT" 'First progress.' "Earlier progress not repeated"
+  assert_not_contains "$LAST_OUTPUT" '  > write split.txt' "Earlier tool call not repeated"
+  assert_contains "$LAST_OUTPUT" 'Trailing progress.' "Incomplete JSON completed"
+  assert_equal 1 "$(printf '%s\n' "$LAST_OUTPUT" | grep -c 'Trailing progress.')" "Final deduplication across slices"
+  assert_contains "$LAST_OUTPUT" '  x write: Denied split write' "Tool name retained across slices"
+  assert_contains "$LAST_OUTPUT" 'session session-partial, tokens 30/5' "Cumulative session and tokens"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] done in' "Completed summary"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] exit 0' "Completed exit"
+  for file in task patch; do
+    [ ! -e "$JOB_DIR/$file" ] || fail "Finished job retained $file"
+  done
+  invoke_args wait "$JOB_ID"
+  assert_status 0 "$LAST_STATUS" "Cached completed wait"
+  assert_contains "$LAST_OUTPUT" 'session session-partial, tokens 30/5' "Cached completed summary"
+  assert_not_contains "$LAST_OUTPUT" 'Trailing progress.' "Cached wait does not replay progress"
+  printf '%s\n' 'continue detached' >"$HOME/task.txt"
+  export FAKE_DSH_MODE=ok
+  invoke_file "$HOME/task.txt" start --continue
+  assert_status 0 "$LAST_STATUS" "Detached continue"
+  JOB_ID=$(printf '%s\n' "$LAST_OUTPUT" | sed -n 's/^\[deepseek-rescue\] started job //p')
+  invoke_args wait "$JOB_ID" --slice 10
+  assert_status 0 "$LAST_STATUS" "Detached continued completion"
+  load_call_args 2
+  assert_equal session-partial "$(arg_value --session-id)" "Detached remembered session"
+}
+
+test_wait_workspace_warning() {
+  export FAKE_DSH_MODE=commit
+  export FAKE_DSH_STDERR="$FIXTURES/missing-credential.stderr"
+  start_job
+  LAST_OUTPUT=$(cd "$HOME" && bash "$FORWARDER" wait "$JOB_ID" --slice 10 2>&1)
+  LAST_STATUS=$?
+  assert_status 0 "$LAST_STATUS" "Wait outside job workspace"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] WARNING: HEAD moved' "Detached workspace HEAD warning"
+  assert_contains "$LAST_OUTPUT" 'dsh: MISSING_CREDENTIAL: Missing credential' "Detached filtered stderr"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] exit 0' "Detached warning exit"
+}
+
+test_wait_final_without_newline() {
+  printf '%s\n' '{"type":"session","sessionId":"session-no-newline"}' >"$HOME/no-newline.jsonl"
+  printf '%s' '{"type":"final","text":"Final without a newline."}' >>"$HOME/no-newline.jsonl"
+  export FAKE_DSH_FIXTURE="$HOME/no-newline.jsonl"
+  start_job
+  invoke_args wait "$JOB_ID" --slice 10
+  assert_status 0 "$LAST_STATUS" "Completed unterminated JSON"
+  assert_contains "$LAST_OUTPUT" 'Final without a newline.' "Unterminated final preserved"
+  assert_contains "$LAST_OUTPUT" 'session session-no-newline' "Unterminated final session"
+}
+
+test_wait_nonzero_exit() {
+  export FAKE_DSH_FIXTURE="$FIXTURES/missing-credential.jsonl"
+  export FAKE_DSH_STDERR="$FIXTURES/missing-credential.stderr"
+  export FAKE_DSH_EXIT=1
+  start_job
+  invoke_args wait "$JOB_ID" --slice 10
+  assert_status 1 "$LAST_STATUS" "Detached failure passthrough"
+  assert_contains "$LAST_OUTPUT" 'dsh: MISSING_CREDENTIAL: Missing credential' "Detached failure stderr"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] error in' "Detached failure summary"
+  assert_contains "$LAST_OUTPUT" 'session session-missing' "Detached failure session"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] exit 1' "Detached failure exit"
+  invoke_args wait "$JOB_ID"
+  assert_status 1 "$LAST_STATUS" "Cached detached failure"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] error in' "Cached failure summary"
+  assert_not_contains "$LAST_OUTPUT" 'dsh: MISSING_CREDENTIAL' "Cached failure does not replay stderr"
+}
+
+test_wait_relative_home() {
+  export DEEPSEEK_RESCUE_HOME=.relative-rescue
+  start_job
+  JOB_DIR="$HOME/repo/$DEEPSEEK_RESCUE_HOME/jobs/$JOB_ID"
+  [ -s "$JOB_DIR/workspace" ] || fail "Relative job home did not create workspace metadata"
+  invoke_args wait "$JOB_ID" --slice 10
+  assert_status 0 "$LAST_STATUS" "Relative job-home completion"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] done in' "Relative job-home summary"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] exit 0' "Relative job-home exit"
+  [ -f "$JOB_DIR/finished" ] || fail "Relative job home did not persist completion"
+  [ ! -e "$JOB_DIR/task" ] || fail "Relative job home did not clean task"
+  invoke_args wait "$JOB_ID"
+  assert_status 0 "$LAST_STATUS" "Relative job-home cached completion"
+}
+
+test_wait_deadline_tree() {
+  export FAKE_DSH_MODE=sleep FAKE_DSH_SLEEP=30 DEEPSEEK_RESCUE_MAX_SECONDS=2
+  export FAKE_DSH_CHILD_PID_FILE="$HOME/child.pid"
+  start_job
+  assert_equal 2 "$(( $(cat "$JOB_DIR/deadline") - $(cat "$JOB_DIR/started") ))" "Configured deadline"
+  await_file "$FAKE_DSH_CHILD_PID_FILE"
+  invoke_args wait "$JOB_ID" --slice 10
+  assert_status 124 "$LAST_STATUS" "Detached deadline"
+  assert_contains "$LAST_OUTPUT" 'timed out after' "Detached timeout summary"
+  assert_contains "$LAST_OUTPUT" 'edits made until then are in the working tree' "Detached timeout edits message"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] exit 124' "Detached timeout exit"
+  assert_child_stopped
+  invoke_args wait "$JOB_ID"
+  assert_status 124 "$LAST_STATUS" "Cached deadline status"
+}
+
+test_cancel_tree() {
+  export FAKE_DSH_MODE=sleep FAKE_DSH_SLEEP=30
+  export FAKE_DSH_CHILD_PID_FILE="$HOME/child.pid"
+  start_job
+  await_file "$FAKE_DSH_CHILD_PID_FILE"
+  invoke_args cancel "$JOB_ID"
+  assert_status 130 "$LAST_STATUS" "Detached cancel"
+  assert_contains "$LAST_OUTPUT" '[deepseek-rescue] exit 130' "Cancelled exit"
+  assert_child_stopped
+  invoke_args wait "$JOB_ID"
+  assert_status 130 "$LAST_STATUS" "Cached cancelled status"
+}
+
+test_detached_invalid_arguments() {
+  invoke_args wait unknown-job
+  assert_status 64 "$LAST_STATUS" "Unknown wait id"
+  invoke_args cancel unknown-job
+  assert_status 64 "$LAST_STATUS" "Unknown cancel id"
+  invoke_args wait
+  assert_status 64 "$LAST_STATUS" "Missing wait id"
+  invoke_args wait ../escape
+  assert_status 64 "$LAST_STATUS" "Unsafe wait id"
+  printf '%s\n' 'invalid detached' >"$HOME/task.txt"
+  invoke_file "$HOME/task.txt" start --continue
+  assert_status 64 "$LAST_STATUS" "Detached continue without session"
+  invoke_file "$HOME/task.txt" start --model '!!js invalid'
+  assert_status 64 "$LAST_STATUS" "Detached invalid model"
+  invoke_file "$HOME/task.txt" start --frobnicate
+  assert_status 64 "$LAST_STATUS" "Detached unknown option"
+  start_job
+  for slice in 0 541 invalid; do
+    invoke_args wait "$JOB_ID" --slice "$slice"
+    assert_status 64 "$LAST_STATUS" "Invalid wait slice $slice"
+  done
+  invoke_args wait "$JOB_ID" --frobnicate
+  assert_status 64 "$LAST_STATUS" "Unknown wait option"
+  invoke_args wait "$JOB_ID" --slice 10
+  assert_status 0 "$LAST_STATUS" "Validation job completion"
+}
+
 run_case() {
   test_name=$1
   test_function=$2
@@ -456,6 +657,15 @@ run_case unknown-flag test_unknown_flag
 run_case empty-task test_empty_task
 run_case timeout test_timeout
 run_case git-warning test_git_warning
+run_case start-metadata test_start_metadata
+run_case wait-partial-progress test_wait_partial_progress
+run_case wait-workspace-warning test_wait_workspace_warning
+run_case wait-final-without-newline test_wait_final_without_newline
+run_case wait-nonzero-exit test_wait_nonzero_exit
+run_case wait-relative-home test_wait_relative_home
+run_case wait-deadline-tree test_wait_deadline_tree
+run_case cancel-tree test_cancel_tree
+run_case detached-invalid-arguments test_detached_invalid_arguments
 run_case manifests test_manifests
 
 if [ "$RUN_COUNT" -eq 0 ]; then

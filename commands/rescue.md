@@ -21,7 +21,8 @@ Execution mode:
 
 Operating rules:
 
-- The subagent is a thin forwarder only. It uses one `Bash` call to run `dsh --profile headless ...` against the current repo, and returns that command's output as-is.
+- The subagent is a thin forwarder only. It calls `preflight`, then `start`, then repeats `wait <id>` while it exits 75. Each is a separate foreground `Bash` call (waits use timeout 600000 ms), never `run_in_background`; the script detaches `dsh` against the current repo and the subagent returns the combined output as-is.
+- Runs last up to `DEEPSEEK_RESCUE_MAX_SECONDS` (default 2700 seconds, 45 minutes), awaited in 480-second slices. The call budget is `1 + 1 + ceil(MAX/480) + 1`. If the subagent is interrupted, the job keeps running: retain its started job id and later use `bash "${CLAUDE_PLUGIN_ROOT}/scripts/deepseek-forward.sh" wait <id>` or `cancel <id>` (exit 130). Edits already made remain in the working tree.
 - Before dispatching, make sure the task text is self-contained: paste in the file paths, signatures and acceptance criteria it refers to. The delegate does not see this conversation.
 - For reviews, diagnoses and second opinions that must not touch the working tree, add `--read-only` (runs `DSH_PERMISSION_MODE=read-only`, which refuses edits).
 - Return the output verbatim to the user. Do not paraphrase, summarize, rewrite, or add commentary before or after it.

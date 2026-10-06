@@ -74,9 +74,10 @@ you how to fix either when it is missing.
 
 Put the flags first, then the task text.
 
-- `--wait` (default) — foreground. Claude Code blocks on one `dsh` call; a run
-  can take up to 9 minutes. Interrupting it rolls nothing back: whatever the
-  delegate already edited stays in your working tree.
+- `--wait` (default) — foreground. Claude Code awaits a detached `dsh` job
+  through repeated `wait` slices. Interrupting the subagent leaves the job
+  running; retain its id to `wait` or `cancel` it later. Edits remain in your
+  working tree.
 - `--background` — the subagent runs in the background and its output is
   relayed when the run ends. Use it for anything longer than a minute.
 - `--model <slug>` — `deepseek-flash` (default, mechanical work) or
@@ -88,11 +89,16 @@ Put the flags first, then the task text.
   it automatically when your request clearly continues prior delegated work
   ("continue", "keep going", "resume").
 
-Every run is capped at 9 minutes (`timeout -k 10 540`, under the Bash tool
-ceiling). The subagent asks for `--json` and prints a compact progress log —
-assistant text, one line per tool call, a line per denial — so a run cut by the
-cap still shows what happened; the edits made until then are in your working
-tree.
+Runs last up to `DEEPSEEK_RESCUE_MAX_SECONDS` (default 2700 seconds, 45 minutes).
+`start` detaches the job and `wait` awaits it in 480-second slices (maximum
+540), each in a separate foreground Bash call with timeout 600000 ms, never
+`run_in_background`. The call budget is `1 + 1 + ceil(MAX/480) + 1`.
+The old 9-minute cap (`timeout -k 10 540`) left room below the Bash tool's
+600-second ceiling; the unchanged `run` command keeps that cap as the short
+path. The subagent asks for `--json` and prints only new progress per slice —
+assistant text, one line per tool call, a line per denial. A wait past the
+deadline kills the process tree with exit 124; `cancel <id>` does so with exit
+130. Edits made until then remain in your working tree.
 
 ## Proactive delegation
 
@@ -116,34 +122,42 @@ lane split, WIP caps and the fallback chain are in
 
 ## What the forwarder actually runs
 
-The subagent makes two Bash calls to `scripts/deepseek-forward.sh`, which holds
-every deterministic step (tested with a fake `dsh` in `tests/run.sh`):
+The subagent calls `preflight`, `start` and repeated `wait` slices through
+`scripts/deepseek-forward.sh`, which holds every deterministic step (tested
+with a fake `dsh` in `tests/run.sh`). Each command is a separate Bash call:
 
 ```bash
 bash scripts/deepseek-forward.sh preflight [--model <slug>]
-bash scripts/deepseek-forward.sh run --model <slug> [--read-only] [--continue] <<'DEEPSEEK_TASK_<nonce>'
+bash scripts/deepseek-forward.sh start --model <slug> [--read-only] [--continue] <<'DEEPSEEK_TASK_<nonce>'
 <your task, verbatim>
 DEEPSEEK_TASK_<nonce>
+bash scripts/deepseek-forward.sh wait <id>
 ```
 
 `preflight` finds the launcher, reads the version and resolves the provider
 (`deepseek-account` when the desktop app is signed in, else `deepseek-official`
-when `DEEPSEEK_API_KEY` is set, else it fails with exit 70). `run` then writes a
-temp `--patch` overlay with the provider and model, appends the constraints
-paragraph and executes (on Windows the app exe is called directly, never the
+when `DEEPSEEK_API_KEY` is set, else it fails with exit 70). `start` then writes
+the patch and task in `${DEEPSEEK_RESCUE_HOME:-$HOME/.deepseek-rescue}/jobs/<id>/`,
+appends the constraints paragraph, snapshots git state and launches a wrapper
+using `nohup` plus background and `disown`. It prints
+`[deepseek-rescue] started job <id>` and exits immediately. The wrapper runs
+(on Windows the app exe is called directly, never the
 `.cmd` shim, which re-parses arguments through cmd.exe):
 
 ```bash
 ELECTRON_RUN_AS_NODE=1 DSH_PERMISSION_MODE=workspace-write GIT_TERMINAL_PROMPT=0 \
 GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
-timeout -k 10 540 "<app exe>" --expose-internals "<cli.js>" \
-  --profile headless --patch <tmp> --json [--session-id <id>] - <task on stdin> \
-  | <app exe|node> scripts/stream-filter.js
+"<app exe>" --expose-internals "<cli.js>" \
+  --profile headless --patch <job>/patch --json [--session-id <id>] - <task on stdin>
 ```
 
-and appends one `[deepseek-rescue] WARNING: <what changed> — review before your
-next git command` line when the run moved `HEAD`, switched branch, changed the
-stash list, the git config or the hooks (it reports, it never reverts).
+`wait` feeds only new complete stdout lines to `scripts/stream-filter.js`.
+Exit 75 means call `wait <id>` again. Completion prints the remaining progress,
+filtered stderr, summary and one `[deepseek-rescue] WARNING: <what changed> —
+review before your next git command` line when the run moved `HEAD`, switched
+branch, changed the stash list, git config or hooks (it reports, never reverts).
+The session id is remembered and temporary job files are cleaned after completion.
+To stop a detached job, use `bash scripts/deepseek-forward.sh cancel <id>`.
 
 ## Safety model
 
@@ -180,7 +194,7 @@ What this does **not** cover — know it before delegating:
 - Web fetch and network commands are not denied. Do not delegate tasks that
   process untrusted content.
 - A delegate can still commit, switch branch or stash despite the constraints
-  paragraph. `run` compares `HEAD`, branch, stash, git config and hooks before
+  paragraph. The forwarder compares `HEAD`, branch, stash, git config and hooks before
   and after and prints a `WARNING` line per change. Treat the paragraph as a
   guardrail, not a sandbox.
 
@@ -193,7 +207,7 @@ What this does **not** cover — know it before delegating:
 | No CLI flags for model/provider; the headless profile defaults to `deepseek-official` and fails `MISSING_CREDENTIAL` without `DEEPSEEK_API_KEY` | a temp `--patch` overlay sets the provider (account token → `deepseek-account`) and the model |
 | Reasoning tokens stream on stderr as `dsh: reasoning:` | dropped; only `dsh: <CODE>: <message>` lines are kept |
 | Headless approval requests have no one to answer and fail closed | the default `workspace-write` and `--read-only` modes never use `danger-full-access` |
-| A delegate can commit, switch branch or stash despite the prompt | `run` compares git metadata before and after and prints a `WARNING` line per change |
+| A delegate can commit, switch branch or stash despite the prompt | the forwarder compares git metadata before and after and prints a `WARNING` line per change |
 | The `--patch` YAML loader evaluates `!!js` tags | `--model` only accepts a plain slug (`[A-Za-z0-9._-]`, max 64); anything else exits 64 |
 | `final` repeats the last assistant text block | the filter prints `final` only when it differs |
 | Windows: the shell tool fails with `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<workspace>)` while file edits still work. The sandbox grants itself access to the workspace and needs your user to hold an **explicit** full-control entry on it; owner rights alone (typical for folders outside your profile, like `C:\projects`) are not enough | one-time fix per tree: `icacls C:\projects /grant <you>:(OI)(CI)F` (undo: `icacls C:\projects /remove:g <you>`) |
@@ -203,8 +217,8 @@ What this does **not** cover — know it before delegating:
 
 | Piece | Purpose |
 |---|---|
-| `agents/deepseek-rescue.md` | Thin forwarder subagent — `preflight` and `run` calls, output returned as-is |
-| `scripts/deepseek-forward.sh` | Launcher discovery, provider/model preflight, patch writing, timeout, session memory, git-change warnings |
+| `agents/deepseek-rescue.md` | Thin forwarder subagent — `preflight`, `start` and `wait` calls, output returned as-is |
+| `scripts/deepseek-forward.sh` | Launcher discovery, provider/model preflight, patch writing, detached jobs, wait slices, cancellation, session memory, git-change warnings |
 | `scripts/stream-filter.js` | `--json` → compact progress log |
 | `tests/run.sh` | Hermetic tests with a fake `dsh` — `bash tests/run.sh` |
 | `/deepseek:rescue` | Delegate a task explicitly (`--background`, `--wait`, `--model`, `--read-only`, `--continue`) |

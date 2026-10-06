@@ -75,9 +75,10 @@ dice cómo arreglar cada uno cuando falta.
 
 Pon los flags primero, luego el texto de la tarea.
 
-- `--wait` (por defecto) — foreground. Claude Code se bloquea en una llamada a
-  `dsh`; una ejecución puede tardar hasta 9 minutos. Interrumpirla no revierte
-  nada: lo que el delegado ya editó se queda en tu árbol de trabajo.
+- `--wait` (por defecto) — foreground. Claude Code espera un job desacoplado
+  de `dsh` mediante llamadas `wait` sucesivas. Si interrumpes el subagente, el
+  job sigue corriendo; conserva su id para esperar o cancelarlo después.
+  Las ediciones quedan en tu árbol de trabajo.
 - `--background` — el subagente corre en segundo plano y su salida se retransmite
   cuando termina la ejecución. Úsalo para cualquier cosa que dure más de un minuto.
 - `--model <slug>` — `deepseek-flash` (por defecto, trabajo mecánico) o
@@ -89,11 +90,17 @@ Pon los flags primero, luego el texto de la tarea.
   lo agrega automáticamente cuando tu pedido claramente continúa trabajo delegado
   previo ("continue", "keep going", "resume").
 
-Cada ejecución tiene un tope de 9 minutos (`timeout -k 10 540`, por debajo del
-techo de la herramienta Bash). El subagente pide `--json` e imprime un log de
-progreso compacto — texto del asistente, una línea por llamada a herramienta, una
-línea por denegación — para que una ejecución cortada por el tope aún muestre qué
-pasó; las ediciones hechas hasta entonces están en tu árbol de trabajo.
+Las ejecuciones duran hasta `DEEPSEEK_RESCUE_MAX_SECONDS` (por defecto 2700
+segundos, 45 minutos). `start` desacopla el job y `wait` lo espera en tramos de
+480 segundos (máximo 540), cada uno en una llamada Bash foreground separada con
+timeout 600000 ms, nunca `run_in_background`. El presupuesto es
+`1 + 1 + ceil(MAX/480) + 1` llamadas. El tope anterior de 9 minutos
+(`timeout -k 10 540`) dejaba margen bajo el techo de 600 segundos de Bash;
+`run` conserva ese tope como vía corta. El subagente pide `--json` e imprime
+solo el progreso nuevo de cada tramo — texto del asistente, una línea por llamada
+a herramienta, una línea por denegación. Un `wait` pasado el plazo mata el árbol
+de procesos con exit 124; `cancel <id>` lo hace con exit 130. Las ediciones
+hechas hasta entonces quedan en tu árbol de trabajo.
 
 ## Delegación proactiva
 
@@ -118,35 +125,43 @@ la división de carriles, los topes de WIP y la cadena de fallback están en
 
 ## Qué ejecuta realmente el forwarder
 
-El subagente hace dos llamadas Bash a `scripts/deepseek-forward.sh`, que concentra
-cada paso determinista (probado con un `dsh` falso en `tests/run.sh`):
+El subagente llama `preflight`, `start` y sucesivos `wait` mediante
+`scripts/deepseek-forward.sh`, que concentra cada paso determinista (probado con
+un `dsh` falso en `tests/run.sh`). Cada comando es una llamada Bash separada:
 
 ```bash
 bash scripts/deepseek-forward.sh preflight [--model <slug>]
-bash scripts/deepseek-forward.sh run --model <slug> [--read-only] [--continue] <<'DEEPSEEK_TASK_<nonce>'
+bash scripts/deepseek-forward.sh start --model <slug> [--read-only] [--continue] <<'DEEPSEEK_TASK_<nonce>'
 <your task, verbatim>
 DEEPSEEK_TASK_<nonce>
+bash scripts/deepseek-forward.sh wait <id>
 ```
 
 `preflight` encuentra el launcher, lee la versión y resuelve el provider
 (`deepseek-account` cuando la app de escritorio tiene sesión iniciada, si no
 `deepseek-official` cuando `DEEPSEEK_API_KEY` está definida, si no falla con exit
-70). `run` luego escribe un overlay `--patch` temporal con el provider y el modelo,
-agrega el párrafo de restricciones y ejecuta (en Windows el app exe se llama
+70). `start` escribe el patch y la tarea en
+`${DEEPSEEK_RESCUE_HOME:-$HOME/.deepseek-rescue}/jobs/<id>/`, agrega el párrafo de
+restricciones, guarda el estado de git y lanza un wrapper con `nohup`, background
+y `disown`. Imprime `[deepseek-rescue] started job <id>` y sale inmediatamente.
+El wrapper ejecuta (en Windows el app exe se llama
 directamente, nunca el shim `.cmd`, que reinterpreta los argumentos a través de
 cmd.exe):
 
 ```bash
 ELECTRON_RUN_AS_NODE=1 DSH_PERMISSION_MODE=workspace-write GIT_TERMINAL_PROMPT=0 \
 GIT_SSH_COMMAND="ssh -o BatchMode=yes" \
-timeout -k 10 540 "<app exe>" --expose-internals "<cli.js>" \
-  --profile headless --patch <tmp> --json [--session-id <id>] - <tarea por stdin> \
-  | <app exe|node> scripts/stream-filter.js
+"<app exe>" --expose-internals "<cli.js>" \
+  --profile headless --patch <job>/patch --json [--session-id <id>] - <tarea por stdin>
 ```
 
-y agrega una línea `[deepseek-rescue] WARNING: <what changed> — review before your
-next git command` cuando la ejecución movió `HEAD`, cambió de rama, alteró la
-lista de stash, el git config o los hooks (informa, nunca revierte).
+`wait` pasa solo las líneas completas nuevas de stdout a `scripts/stream-filter.js`.
+Exit 75 significa volver a llamar `wait <id>`. Al terminar imprime el progreso
+restante, stderr filtrado, el resumen y una línea `[deepseek-rescue] WARNING:
+<what changed> — review before your next git command` cuando la ejecución movió
+`HEAD`, cambió de rama, alteró la lista de stash, git config o hooks (informa,
+nunca revierte). Recuerda el id de sesión y limpia los archivos temporales del
+job al terminar. Para detenerlo, usa `bash scripts/deepseek-forward.sh cancel <id>`.
 
 ## Modelo de seguridad
 
@@ -184,7 +199,7 @@ Lo que esto **no** cubre — conócelo antes de delegar:
 - Web fetch y los comandos de red no están denegados. No delegues tareas que
   procesen contenido no confiable.
 - Un delegado aún puede hacer commit, cambiar de rama o stash pese al párrafo de
-  restricciones. `run` compara `HEAD`, rama, stash, git config y hooks antes y
+  restricciones. El forwarder compara `HEAD`, rama, stash, git config y hooks antes y
   después e imprime una línea `WARNING` por cada cambio. Trata el párrafo como una
   barandilla, no como un sandbox.
 
@@ -197,7 +212,7 @@ Lo que esto **no** cubre — conócelo antes de delegar:
 | No hay flags de CLI para modelo/provider; el perfil headless usa por defecto `deepseek-official` y falla `MISSING_CREDENTIAL` sin `DEEPSEEK_API_KEY` | un overlay `--patch` temporal fija el provider (token de cuenta → `deepseek-account`) y el modelo |
 | Los tokens de razonamiento van por stderr como `dsh: reasoning:` | se descartan; solo se conservan las líneas `dsh: <CODE>: <message>` |
 | Las solicitudes de aprobación headless no tienen quién responda y fallan cerradas | los modos por defecto `workspace-write` y `--read-only` nunca usan `danger-full-access` |
-| Un delegado puede hacer commit, cambiar de rama o stash pese al prompt | `run` compara los metadatos de git antes y después e imprime una línea `WARNING` por cada cambio |
+| Un delegado puede hacer commit, cambiar de rama o stash pese al prompt | el forwarder compara los metadatos de git antes y después e imprime una línea `WARNING` por cada cambio |
 | El loader YAML de `--patch` evalúa tags `!!js` | `--model` solo acepta un slug simple (`[A-Za-z0-9._-]`, máx. 64); cualquier otra cosa sale con 64 |
 | `final` repite el último bloque de texto | el filtro imprime `final` solo si difiere |
 | Windows: la herramienta de shell falla con `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<workspace>)` aunque las ediciones de archivos funcionen. El sandbox se concede acceso al workspace y necesita que tu usuario tenga una entrada **explícita** de control total; los derechos de dueño solos (típico en carpetas fuera del perfil, como `C:\proyectos`) no bastan | arreglo único por árbol: `icacls C:\proyectos /grant <tu-usuario>:(OI)(CI)F` (deshacer: `icacls C:\proyectos /remove:g <tu-usuario>`) |
@@ -207,8 +222,8 @@ Lo que esto **no** cubre — conócelo antes de delegar:
 
 | Pieza | Propósito |
 |---|---|
-| `agents/deepseek-rescue.md` | Subagente forwarder delgado — llamadas `preflight` y `run`, salida devuelta tal cual |
-| `scripts/deepseek-forward.sh` | Descubrimiento del launcher, preflight de provider/modelo, escritura del patch, timeout, memoria de sesión, avisos de cambio de git |
+| `agents/deepseek-rescue.md` | Subagente forwarder delgado — llamadas `preflight`, `start` y `wait`, salida devuelta tal cual |
+| `scripts/deepseek-forward.sh` | Descubrimiento del launcher, preflight de provider/modelo, escritura del patch, jobs desacoplados, tramos de espera, cancelación, memoria de sesión, avisos de cambio de git |
 | `scripts/stream-filter.js` | `--json` → log de progreso compacto |
 | `tests/run.sh` | Tests herméticos con un `dsh` falso — `bash tests/run.sh` |
 | `/deepseek:rescue` | Delega una tarea de forma explícita (`--background`, `--wait`, `--model`, `--read-only`, `--continue`) |

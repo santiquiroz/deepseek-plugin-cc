@@ -40,8 +40,27 @@ fi
 
 case "${FAKE_DSH_MODE:-ok}" in
   sleep)
-    sleep 30
+    sleep "${FAKE_DSH_SLEEP:-30}" &
+    child_pid=$!
+    if [ -n "${FAKE_DSH_CHILD_PID_FILE:-}" ]; then
+      printf '%s\n' "$child_pid" >"$FAKE_DSH_CHILD_PID_FILE"
+    fi
+    wait "$child_pid"
     exit 0
+    ;;
+  partial)
+    printf '%s\n' '{"type":"session","sessionId":"session-partial"}'
+    printf '%s\n' '{"type":"tool_call","callId":"split-call","tool":"write","input":{"path":"split.txt"}}'
+    printf '%s\n' '{"type":"status","phase":"step_end","usage":{"inputTokens":10,"outputTokens":2}}'
+    printf '%s\n' '{"type":"text","text":"First progress."}'
+    printf '%s' '{"type":"text","text":"Trailing'
+    : >"$FAKE_DSH_CALLS/partial-ready"
+    sleep "${FAKE_DSH_SLEEP:-4}"
+    printf '%s\n' ' progress."}'
+    printf '%s\n' '{"type":"tool_result","callId":"split-call","status":"error","result":"Denied split write"}'
+    printf '%s\n' '{"type":"status","phase":"step_end","usage":{"inputTokens":20,"outputTokens":3}}'
+    printf '%s\n' '{"type":"final","text":"Trailing progress."}'
+    exit "${FAKE_DSH_EXIT:-0}"
     ;;
   commit)
     git commit --allow-empty -q -m fake || exit $?
