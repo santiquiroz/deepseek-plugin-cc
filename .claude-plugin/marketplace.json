@@ -1,0 +1,21 @@
+{
+  "name": "deepseek-plugin-cc",
+  "owner": {
+    "name": "santiquiroz"
+  },
+  "metadata": {
+    "description": "DeepSeek plugin for Claude Code: delegate coding tasks to DeepSeek Harness CLI (dsh) headless.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "deepseek",
+      "description": "Delegate coding tasks from Claude Code to DeepSeek Harness CLI (dsh) in headless mode — the preferred first agentic lane, with a read-only mode for second opinions.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Santiago Quiroz Upegui"
+      },
+      "source": "./"
+    }
+  ]
+}

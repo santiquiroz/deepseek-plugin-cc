@@ -1,0 +1,4 @@
+{"type":"session","sessionId":"session-balance","cwd":"C:\\path\\to\\workspace"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"Insufficient Balance","code":"INSUFFICIENT_BALANCE"}}}
+{"type":"final","text":""}

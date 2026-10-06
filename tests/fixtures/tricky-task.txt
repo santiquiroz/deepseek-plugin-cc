@@ -1,0 +1,5 @@
+/review: it's "quoted" `uname` $HOME ${PATH} \n \t
+--model not-a-flag
+EOF_TASK
+DEEPSEEK_TASK_deadbeef
+ünïcödé ✓ — done
