@@ -28,5 +28,5 @@ Operating rules:
 - Return the output verbatim to the user. Do not paraphrase, summarize, rewrite, or add commentary before or after it.
 - Do not ask the subagent to inspect files, monitor progress, summarize output, or do follow-up work of its own.
 - If the returned output says `dsh` is not installed or that there are no DeepSeek credentials, tell the user to run `/deepseek:setup`.
-- If the returned output starts with `[deepseek-rescue] DeepSeek balance or rate limit hit`, nothing more will run on DeepSeek — hand the task to another delegate (Codex, Copilot, Antigravity, Cursor, Ollama) or take it inline, and say so once. Do not retry automatically.
+- If the returned output starts with `[deepseek-rescue] DeepSeek balance or rate limit hit`, nothing more will run on DeepSeek — report it to the user so they can choose another path, and say so once. Do not retry automatically.
 - If the user did not supply a task, ask what task DeepSeek should perform.

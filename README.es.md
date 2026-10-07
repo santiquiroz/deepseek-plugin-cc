@@ -4,37 +4,29 @@ Delega tareas de código desde [Claude Code](https://claude.com/claude-code) a
 la CLI de [DeepSeek Harness](https://www.deepseek.com/) (`dsh`) en modo headless.
 
 Claude Code sigue siendo el orquestador — escribe la lógica de dominio, define
-el contrato de cada subtarea y revisa los diffs. DeepSeek Harness es **el primer
-carril agéntico preferido**: el delegado lee y edita archivos y ejecuta comandos
-en tu repositorio, bajo un sandbox a nivel de SO confinado al directorio de
-trabajo, y `--read-only` rechaza ediciones para revisiones y diagnósticos que no
-deben tocar el árbol de trabajo. `deepseek-flash` cubre trabajo mecánico y
-`deepseek-v4-pro` cubre trabajo de razonamiento; la facturación es el saldo de
-tu plataforma DeepSeek (pago por uso).
-
-Hermano de [copilot-plugin-cc](https://github.com/santiquiroz/copilot-plugin-cc),
-[antigravity-plugin-cc](https://github.com/santiquiroz/antigravity-plugin-cc),
-[ollama-plugin-cc](https://github.com/santiquiroz/ollama-plugin-cc),
-[cursor-plugin-cc](https://github.com/santiquiroz/cursor-plugin-cc) y
-[bipolar-plugin-cc](https://github.com/santiquiroz/bipolar-plugin-cc), todos
-inspirados en la estructura de [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc).
-**No está afiliado con DeepSeek, OpenAI, GitHub, Google ni Anthropic.**
+el contrato de cada subtarea y revisa los diffs. El delegado lee y edita archivos
+y ejecuta comandos en tu repositorio, bajo un sandbox a nivel de SO confinado
+al directorio de trabajo, y `--read-only` rechaza ediciones para revisiones y
+diagnósticos que no deben tocar el árbol de trabajo. `deepseek-flash` cubre
+trabajo mecánico y `deepseek-v4-pro` cubre trabajo de razonamiento; la
+facturación es el saldo de tu plataforma DeepSeek (pago por uso).
 
 > Read this in English: [README.md](README.md)
 
-## Dónde encaja en una cadena de delegación
+## Cuándo conviene
 
-| Nivel | Delegado | Sirve para |
-|---|---|---|
-| trivial | [ollama-plugin-cc](https://github.com/santiquiroz/ollama-plugin-cc) | transformaciones de texto de un solo paso en un modelo local pequeño |
-| medio (local) | [bipolar-plugin-cc](https://github.com/santiquiroz/bipolar-plugin-cc) | tareas agénticas acotadas en un modelo local grande |
-| **primer carril** | **deepseek-plugin-cc (este)** | trabajo mecánico con `deepseek-flash`, trabajo de razonamiento con `deepseek-v4-pro`; preferido sobre los otros carriles en la nube |
-| mecánico (fallback) | [copilot-plugin-cc](https://github.com/santiquiroz/copilot-plugin-cc) | boilerplate, renombres, specs simples, limpieza |
-| carril agéntico extra | [cursor-plugin-cc](https://github.com/santiquiroz/cursor-plugin-cc) | tareas acotadas cuando los otros carriles se quedaron sin cuota, segundas opiniones en solo lectura |
-| frontier, segundo carril | [antigravity-plugin-cc](https://github.com/santiquiroz/antigravity-plugin-cc) | fallback de Codex, segundas opiniones |
-| frontier, primario | Codex / tu delegado principal de razonamiento | implementación cercana a arquitectura, diagnóstico profundo |
-
-Solo existen los carriles que instales; el plugin también funciona solo.
+- **Dos modelos para dos tipos de trabajo.** `deepseek-flash` (por defecto)
+  para tareas mecánicas — boilerplate, renombres, un archivo de spec, un build
+  fix — y `deepseek-v4-pro` (vía `--model`) para tareas de razonamiento —
+  diagnóstico, código cercano a arquitectura.
+- **Un delegado que trabaja en tu repo.** La ejecución edita archivos y corre
+  comandos en el propio directorio de trabajo, confinada por un sandbox a nivel
+  de SO; las escrituras fuera del workspace fallan cerradas. Para revisiones y
+  segundas opiniones que no deben tocar el árbol, `--read-only` rechaza
+  ediciones.
+- **Pago por uso.** Cada ejecución se cobra contra tu saldo de
+  platform.deepseek.com, así que vigílalo: el CLI no expone un comando de uso
+  headless que el forwarder pueda leer antes de una ejecución.
 
 ## Requisitos
 
@@ -53,6 +45,8 @@ En Claude Code:
 /plugin install deepseek@deepseek-plugin-cc
 ```
 
+## Configuración inicial
+
 Luego, una vez por máquina:
 
 ```
@@ -61,6 +55,19 @@ Luego, una vez por máquina:
 
 Setup localiza el CLI, comprueba la versión y el provider/inicio de sesión, y te
 dice cómo arreglar cada uno cuando falta.
+
+- **Inicio de sesión.** Abre DeepSeek Harness e inicia sesión una vez: el token
+  de cuenta se lee de `${DSH_HOME:-$HOME/.dsh}/.credentials.yaml` y la ejecución
+  usa el provider `deepseek-account`. Sin sesión iniciada, exporta
+  `DEEPSEEK_API_KEY` para usar el provider `deepseek-official`. Sin ninguno de
+  los dos, `preflight` falla con exit 70.
+- **Acceso al workspace en Windows.** Si los comandos de shell en el sandbox
+  fallan con `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<workspace>)`,
+  tu usuario necesita una entrada **explícita** de control total sobre el
+  workspace — los derechos de dueño solos (típico en carpetas fuera del perfil,
+  como `C:\proyectos`) no bastan. Arreglo único por árbol:
+  `icacls C:\proyectos /grant <tu-usuario>:(OI)(CI)F`
+  (deshacer: `icacls C:\proyectos /remove:g <tu-usuario>`).
 
 ## Uso
 
@@ -71,7 +78,7 @@ dice cómo arreglar cada uno cuando falta.
 /deepseek:rescue --model deepseek-v4-pro diagnose this build failure across the module graph ...
 ```
 
-### Flags y límites
+### Flags
 
 Pon los flags primero, luego el texto de la tarea.
 
@@ -90,40 +97,39 @@ Pon los flags primero, luego el texto de la tarea.
   lo agrega automáticamente cuando tu pedido claramente continúa trabajo delegado
   previo ("continue", "keep going", "resume").
 
+### Ejecuciones largas
+
 Las ejecuciones duran hasta `DEEPSEEK_RESCUE_MAX_SECONDS` (por defecto 2700
 segundos, 45 minutos). `start` desacopla el job y `wait` lo espera en tramos de
-480 segundos (máximo 540), cada uno en una llamada Bash foreground separada con
-timeout 600000 ms, nunca `run_in_background`. El presupuesto es
-`1 + 1 + ceil(MAX/480) + 1` llamadas. El tope anterior de 9 minutos
-(`timeout -k 10 540`) dejaba margen bajo el techo de 600 segundos de Bash;
-`run` conserva ese tope como vía corta. El subagente pide `--json` e imprime
-solo el progreso nuevo de cada tramo — texto del asistente, una línea por llamada
-a herramienta, una línea por denegación. Un `wait` pasado el plazo mata el árbol
-de procesos con exit 124; `cancel <id>` lo hace con exit 130. Las ediciones
-hechas hasta entonces quedan en tu árbol de trabajo.
+480 segundos (máximo 540; `--slice <segundos>` cambia la duración del tramo),
+cada uno en una llamada Bash foreground separada con timeout 600000 ms, nunca
+`run_in_background`. El presupuesto es `1 + 1 + ceil(MAX/480) + 1` llamadas.
+El tope anterior de 9 minutos (`timeout -k 10 540`) dejaba margen bajo el techo
+de 600 segundos de Bash; `run` conserva ese tope como vía corta. El subagente
+pide `--json` e imprime solo el progreso nuevo de cada tramo — texto del
+asistente, una línea por llamada a herramienta, una línea por denegación. Un
+`wait` pasado el plazo mata el árbol de procesos con exit 124; `cancel <id>`
+lo hace con exit 130. Las ediciones hechas hasta entonces quedan en tu árbol de
+trabajo. Si el subagente se interrumpe, el job desacoplado sigue corriendo:
+conserva su id para esperar o cancelarlo después.
 
-## Delegación proactiva
+### Delegación proactiva
 
 La descripción del agente `deepseek-rescue` le dice a Claude Code que lo use por
-su cuenta como primer carril. Esa ejecución envía el texto de la tarea al backend
-de DeepSeek y deja que el modelo edite archivos en el repositorio actual dentro de
-un sandbox confinado al espacio de trabajo. Lo que se interpone entre eso y tu
-árbol de trabajo es el sistema de permisos propio de Claude Code: la única
-herramienta del subagente es `Bash`, así que en el modo de permisos por defecto
-apruebas el comando de lanzamiento antes de que corra, mientras que bajo bypass
-mode corre sin preguntar. Si quieres delegación solo bajo pedido, omite el
-snippet de CLAUDE.md y agrega esta línea a `~/.claude/CLAUDE.md`:
+su cuenta. Esa ejecución envía el texto de la tarea al backend de DeepSeek y deja
+que el modelo edite archivos en el repositorio actual dentro de un sandbox
+confinado al espacio de trabajo. Lo que se interpone entre eso y tu árbol de
+trabajo es el sistema de permisos propio de Claude Code: la única herramienta
+del subagente es `Bash`, así que en el modo de permisos por defecto apruebas el
+comando de lanzamiento antes de que corra, mientras que bajo bypass mode corre
+sin preguntar. Si quieres delegación solo bajo pedido, agrega esta línea a
+`~/.claude/CLAUDE.md`:
 
 ```
 Never launch deepseek:deepseek-rescue on your own; use it only when I invoke /deepseek:rescue explicitly.
 ```
 
-Para que la delegación proactiva sea rutinaria, pega el bloque de
-[docs/claude-md-snippet.md](docs/claude-md-snippet.md) en tu `CLAUDE.md`;
-la división de carriles, los topes de WIP y la cadena de fallback están en
-[docs/delegation-guide.md](docs/delegation-guide.md).
-
-## Qué ejecuta realmente el forwarder
+### Qué ejecuta realmente el forwarder
 
 El subagente llama `preflight`, `start` y sucesivos `wait` mediante
 `scripts/deepseek-forward.sh`, que concentra cada paso determinista (probado con
@@ -203,10 +209,34 @@ Lo que esto **no** cubre — conócelo antes de delegar:
   después e imprime una línea `WARNING` por cada cambio. Trata el párrafo como una
   barandilla, no como un sandbox.
 
-## Comportamientos conocidos del CLI de DeepSeek que este plugin mitiga
+## Configuración
 
-| Comportamiento (0.2.0-rc.2) | Manejo |
+Todas las variables siguientes las lee `scripts/deepseek-forward.sh`:
+
+- `DEEPSEEK_RESCUE_MAX_SECONDS` (por defecto `2700`) — plazo de un job lanzado
+  con `start`, esperado mediante tramos `wait`.
+- `DEEPSEEK_RESCUE_TIMEOUT` (por defecto `540`) — tope de la vía corta `run`.
+- `DEEPSEEK_RESCUE_HOME` (por defecto `$HOME/.deepseek-rescue`) — jobs
+  desacoplados en `jobs/<id>/`, sesiones recordadas en
+  `sessions/<sha1 de $PWD>`.
+- `DEEPSEEK_API_KEY` — API key para el provider `deepseek-official` cuando la
+  app de escritorio no tiene sesión iniciada.
+- `DSH_HOME` (por defecto `$HOME/.dsh`) — ubicación del token de cuenta
+  (`.credentials.yaml`) para el provider `deepseek-account`.
+- `DSH_BIN` — usa este binario `dsh` en lugar de la app instalada.
+- `DSH_PERMISSION_MODE` — lo gestiona el forwarder (`workspace-write`, o
+  `read-only` con `--read-only`); `danger-full-access` se rechaza con exit 64.
+
+## Solución de problemas
+
+Todas las entradas siguientes están verificadas contra DeepSeek Harness
+0.2.0-rc.2 (Windows 11).
+
+| Síntoma | Manejo |
 |---|---|
+| `dsh not found` (exit 127) | instala la app de escritorio de DeepSeek Harness (o define `DSH_BIN`), luego corre `/deepseek:setup` de nuevo |
+| Sin credenciales (exit 70) / `MISSING_CREDENTIAL` | abre DeepSeek Harness e inicia sesión una vez (token de cuenta), o exporta `DEEPSEEK_API_KEY`, luego corre `/deepseek:setup` de nuevo |
+| La salida menciona `Insufficient Balance`, `402`, `rate limit`, `429`, `quota`, `MISSING_CREDENTIAL`, `401` o `Authentication` | la ejecución se detiene con `[deepseek-rescue] DeepSeek balance or rate limit hit`; nunca se reintenta — la tarea necesita otra vía |
 | `dsh.cmd` pasa argumentos a través de `cmd.exe`, que reinterpreta las comillas | el app exe se llama directamente con `ELECTRON_RUN_AS_NODE=1` y `--expose-internals <cli.js>` |
 | `ELECTRON_RUN_AS_NODE=1` convierte el app exe en un runtime de Node | el filtro de stream también corre sobre ese exe, así que no se requiere un `node` aparte |
 | No hay flags de CLI para modelo/provider; el perfil headless usa por defecto `deepseek-official` y falla `MISSING_CREDENTIAL` sin `DEEPSEEK_API_KEY` | un overlay `--patch` temporal fija el provider (token de cuenta → `deepseek-account`) y el modelo |
@@ -217,30 +247,18 @@ Lo que esto **no** cubre — conócelo antes de delegar:
 | `final` repite el último bloque de texto | el filtro imprime `final` solo si difiere |
 | Windows: la herramienta de shell falla con `SetNamedSecurityInfoW failed (Win32 5): grantWrite(<workspace>)` aunque las ediciones de archivos funcionen. El sandbox se concede acceso al workspace y necesita que tu usuario tenga una entrada **explícita** de control total; los derechos de dueño solos (típico en carpetas fuera del perfil, como `C:\proyectos`) no bastan | arreglo único por árbol: `icacls C:\proyectos /grant <tu-usuario>:(OI)(CI)F` (deshacer: `icacls C:\proyectos /remove:g <tu-usuario>`) |
 | Windows: dentro del sandbox los programas MSYS2 (Git Bash, `sed`, `grep`…) mueren al arrancar con `0xC0000022` | el delegado usa PowerShell; las herramientas nativas (`git`, `node`, `python`, `dotnet`) funcionan. Pide comandos de PowerShell en tareas que deban correr scripts |
+| El layout de instalación de macOS no está verificado (`/Applications/DeepSeek Harness.app/...`) | el forwarder lo intenta y luego cae a un `dsh` en el PATH |
 
-## Qué hay en el plugin
+## Con otros delegados
 
-| Pieza | Propósito |
-|---|---|
-| `agents/deepseek-rescue.md` | Subagente forwarder delgado — llamadas `preflight`, `start` y `wait`, salida devuelta tal cual |
-| `scripts/deepseek-forward.sh` | Descubrimiento del launcher, preflight de provider/modelo, escritura del patch, jobs desacoplados, tramos de espera, cancelación, memoria de sesión, avisos de cambio de git |
-| `scripts/stream-filter.js` | `--json` → log de progreso compacto |
-| `tests/run.sh` | Tests herméticos con un `dsh` falso — `bash tests/run.sh` |
-| `/deepseek:rescue` | Delega una tarea de forma explícita (`--background`, `--wait`, `--model`, `--read-only`, `--continue`) |
-| `/deepseek:setup` | Localiza el CLI, versión, provider/inicio de sesión y cómo arreglar cada uno |
-| `docs/claude-md-snippet.md` | Bloque de CLAUDE.md listo para pegar |
-| `docs/delegation-guide.md` | Guía de orquestación multi-carril |
+Este plugin no asume ningún orden frente a otros delegados: solo reenvía tareas
+a `dsh` e informa el resultado. Si corres varios delegados, el orden, los
+disparadores y el reparto del trabajo los decides tú en tu propio `CLAUDE.md`.
 
-## Todavía no
-
-- El layout de instalación de macOS no está verificado
-  (`/Applications/DeepSeek Harness.app/...`); el forwarder lo intenta y luego
-  cae a un `dsh` en el PATH.
-- Una variante skill para Codex CLI (copilot-plugin-cc incluye una).
-- Indicador de cuota: la facturación es el saldo de la plataforma DeepSeek, pero
-  el CLI no expone un comando de uso headless que el forwarder pueda leer antes de
-  una ejecución.
+Proyectos relacionados, sin ningún orden en particular: [copilot-plugin-cc](https://github.com/santiquiroz/copilot-plugin-cc), [antigravity-plugin-cc](https://github.com/santiquiroz/antigravity-plugin-cc), [ollama-plugin-cc](https://github.com/santiquiroz/ollama-plugin-cc), [cursor-plugin-cc](https://github.com/santiquiroz/cursor-plugin-cc) y [bipolar-plugin-cc](https://github.com/santiquiroz/bipolar-plugin-cc), todos inspirados en la estructura de [openai/codex-plugin-cc](https://github.com/openai/codex-plugin-cc).
 
 ## Licencia
 
 [MIT](LICENSE)
+
+**No está afiliado con DeepSeek, OpenAI, GitHub, Google ni Anthropic.**

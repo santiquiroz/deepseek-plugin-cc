@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1 — 2026-10-07
+
+- README y descripción del subagente independientes de una configuración de varios carriles.
+- `docs/` y `commands/`: mismo lenguaje neutral, sin carriles ni orden frente a otros plugins.
+
 ## 0.2.0 — 2026-10-06
 
 - Detached `start` jobs and `wait` slices let delegations run up to

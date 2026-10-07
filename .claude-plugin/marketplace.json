@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "DeepSeek plugin for Claude Code: delegate coding tasks to DeepSeek Harness CLI (dsh) headless.",
-    "version": "0.2.0"
+    "version": "0.2.1"
   },
   "plugins": [
     {
       "name": "deepseek",
-      "description": "Delegate coding tasks from Claude Code to DeepSeek Harness CLI (dsh) in headless mode — the preferred first agentic lane, with a read-only mode for second opinions.",
-      "version": "0.2.0",
+      "description": "Delegate coding tasks from Claude Code to DeepSeek Harness CLI (dsh) in headless mode, with a read-only mode for second opinions.",
+      "version": "0.2.1",
       "author": {
         "name": "Santiago Quiroz Upegui"
       },
